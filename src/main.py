@@ -5,8 +5,9 @@ import argparse
 import pathlib
 sys.path.append(str(pathlib.Path(__file__).parent.parent))
 from src.agent.decision_maker import TradingAgent
-from src.indicators.taapi_client import TAAPIClient
+from src.indicators.hyperliquid_indicators import HyperliquidIndicators
 from src.trading.hyperliquid_api import HyperliquidAPI
+from src.sentiment.x_sentiment import XSentimentAnalyzer
 import asyncio
 import logging
 from collections import deque, OrderedDict
@@ -21,7 +22,11 @@ from src.utils.prompt_utils import json_default, round_or_none, round_series
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Force reconfigure logging (clears any existing configuration)
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+    
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True)
 
 
 def clear_terminal():
@@ -64,9 +69,10 @@ def main():
     if not args.assets or not args.interval:
         parser.error("Please provide --assets and --interval, or set ASSETS and INTERVAL in .env")
 
-    taapi = TAAPIClient()
     hyperliquid = HyperliquidAPI()
+    indicators = HyperliquidIndicators(hyperliquid)
     agent = TradingAgent()
+    sentiment = XSentimentAnalyzer()
 
 
     start_time = datetime.now(timezone.utc)
@@ -96,6 +102,9 @@ def main():
             state = await hyperliquid.get_user_state()
             total_value = state.get('total_value') or state['balance'] + sum(p.get('pnl', 0) for p in state['positions'])
             sharpe = calculate_sharpe(trade_log)
+            
+            # Fetch user fee rates
+            user_fees = await hyperliquid.get_user_fees()
 
             account_value = total_value
             if initial_account_value is None:
@@ -143,15 +152,84 @@ def main():
             except Exception:
                 open_orders = []
 
-            # Reconcile active trades
+            # Reconcile active trades and clean up orphaned orders
             try:
                 assets_with_positions = set()
+                position_sizes = {}
                 for pos in state['positions']:
                     try:
-                        if abs(float(pos.get('szi') or 0)) > 0:
-                            assets_with_positions.add(pos.get('coin'))
+                        size = abs(float(pos.get('szi') or 0))
+                        if size > 0:
+                            coin = pos.get('coin')
+                            assets_with_positions.add(coin)
+                            position_sizes[coin] = size
                     except Exception:
                         continue
+                
+                # Clean up orphaned TP/SL orders (no matching position)
+                tp_sl_orders_by_asset = {}
+                for o in (open_orders or []):
+                    order_type = o.get('orderType', '')
+                    if isinstance(order_type, str) and ('Take Profit' in order_type or 'Stop Market' in order_type):
+                        coin = o.get('coin')
+                        if coin not in tp_sl_orders_by_asset:
+                            tp_sl_orders_by_asset[coin] = []
+                        tp_sl_orders_by_asset[coin].append(o)
+                
+                # Cancel orphaned TP/SL orders
+                for coin, orders in tp_sl_orders_by_asset.items():
+                    if coin not in assets_with_positions:
+                        add_event(f"Found {len(orders)} orphaned TP/SL orders for {coin} (no position) - cancelling")
+                        for order in orders:
+                            try:
+                                await hyperliquid.cancel_order(coin, order.get('oid'))
+                                add_event(f"Cancelled orphaned {order.get('orderType')} for {coin}")
+                            except Exception as e:
+                                logging.error(f"Failed to cancel orphaned order {order.get('oid')}: {e}")
+                    elif len(orders) > 2:
+                        # If more than 2 TP/SL orders (should only have 1 TP + 1 SL), cancel duplicates
+                        # Keep the most recent ones based on size matching position
+                        position_size = position_sizes.get(coin, 0)
+                        matching_orders = []
+                        non_matching_orders = []
+                        
+                        for order in orders:
+                            order_size = abs(float(order.get('sz', 0)))
+                            if abs(order_size - position_size) < 0.001:  # Close enough match
+                                matching_orders.append(order)
+                            else:
+                                non_matching_orders.append(order)
+                        
+                        # Cancel non-matching orders
+                        for order in non_matching_orders:
+                            try:
+                                await hyperliquid.cancel_order(coin, order.get('oid'))
+                                add_event(f"Cancelled mismatched {order.get('orderType')} for {coin} (size {order.get('sz')} vs position {position_size})")
+                            except Exception as e:
+                                logging.error(f"Failed to cancel mismatched order {order.get('oid')}: {e}")
+                        
+                        # If we have more than 2 matching orders, keep only 2 (1 TP, 1 SL)
+                        if len(matching_orders) > 2:
+                            tp_orders = [o for o in matching_orders if 'Take Profit' in o.get('orderType', '')]
+                            sl_orders = [o for o in matching_orders if 'Stop' in o.get('orderType', '')]
+                            
+                            # Cancel extra TP orders (keep first)
+                            for order in tp_orders[1:]:
+                                try:
+                                    await hyperliquid.cancel_order(coin, order.get('oid'))
+                                    add_event(f"Cancelled duplicate TP for {coin}")
+                                except Exception as e:
+                                    logging.error(f"Failed to cancel duplicate TP {order.get('oid')}: {e}")
+                            
+                            # Cancel extra SL orders (keep first)
+                            for order in sl_orders[1:]:
+                                try:
+                                    await hyperliquid.cancel_order(coin, order.get('oid'))
+                                    add_event(f"Cancelled duplicate SL for {coin}")
+                                except Exception as e:
+                                    logging.error(f"Failed to cancel duplicate SL {order.get('oid')}: {e}")
+                
+                # Reconcile active_trades in-memory list
                 assets_with_orders = {o.get('coin') for o in (open_orders or []) if o.get('coin')}
                 for tr in active_trades[:]:
                     asset = tr.get('asset')
@@ -166,7 +244,8 @@ def main():
                                 "reason": "no_position_no_orders",
                                 "opened_at": tr.get('opened_at')
                             }) + "\n")
-            except Exception:
+            except Exception as e:
+                logging.error(f"Reconciliation error: {e}")
                 pass
 
             recent_fills_struct = []
@@ -219,6 +298,7 @@ def main():
                 "open_orders": open_orders_struct,
                 "recent_diary": recent_diary,
                 "recent_fills": recent_fills_struct,
+                "fee_structure": user_fees,  # Pure data: user's current fee rates
             }
 
             # Gather data for ALL assets first
@@ -234,18 +314,36 @@ def main():
                     oi = await hyperliquid.get_open_interest(asset)
                     funding = await hyperliquid.get_funding_rate(asset)
 
+                    # Fetch 5m indicators from Hyperliquid
                     intraday_tf = "5m"
-                    ema_series = taapi.fetch_series("ema", f"{asset}/USDT", intraday_tf, results=10, params={"period": 20}, value_key="value")
-                    macd_series = taapi.fetch_series("macd", f"{asset}/USDT", intraday_tf, results=10, value_key="valueMACD")
-                    rsi7_series = taapi.fetch_series("rsi", f"{asset}/USDT", intraday_tf, results=10, params={"period": 7}, value_key="value")
-                    rsi14_series = taapi.fetch_series("rsi", f"{asset}/USDT", intraday_tf, results=10, params={"period": 14}, value_key="value")
-
-                    lt_ema20 = taapi.fetch_value("ema", f"{asset}/USDT", "4h", params={"period": 20}, key="value")
-                    lt_ema50 = taapi.fetch_value("ema", f"{asset}/USDT", "4h", params={"period": 50}, key="value")
-                    lt_atr3 = taapi.fetch_value("atr", f"{asset}/USDT", "4h", params={"period": 3}, key="value")
-                    lt_atr14 = taapi.fetch_value("atr", f"{asset}/USDT", "4h", params={"period": 14}, key="value")
-                    lt_macd_series = taapi.fetch_series("macd", f"{asset}/USDT", "4h", results=10, value_key="valueMACD")
-                    lt_rsi_series = taapi.fetch_series("rsi", f"{asset}/USDT", "4h", results=10, params={"period": 14}, value_key="value")
+                    intraday_candles = await indicators.get_candles(asset, intraday_tf, num_candles=100)
+                    # Pass candles to avoid duplicate API call
+                    intraday_data = await indicators.get_indicators_from_candles(asset, intraday_tf, intraday_candles)
+                    
+                    # Get series for intraday indicators
+                    ema_series = indicators.get_series(intraday_candles, "ema", 20)
+                    macd_series = indicators.get_series(intraday_candles, "macd")
+                    rsi7_series = indicators.get_series(intraday_candles, "rsi", 7)
+                    rsi14_series = indicators.get_series(intraday_candles, "rsi", 14)
+                    
+                    # Calculate market metrics for 5m timeframe
+                    intraday_market_metrics = indicators.calculate_market_metrics(intraday_candles, intraday_data)
+                    
+                    # Fetch 4h indicators from Hyperliquid
+                    lt_candles = await indicators.get_candles(asset, "4h", num_candles=100)
+                    # Pass candles to avoid duplicate API call
+                    lt_data = await indicators.get_indicators_from_candles(asset, "4h", lt_candles)
+                    
+                    # Calculate market metrics for 4h timeframe
+                    lt_market_metrics = indicators.calculate_market_metrics(lt_candles, lt_data)
+                    
+                    # Extract long-term values
+                    lt_ema20 = lt_data.get("ema20")
+                    lt_ema50 = lt_data.get("ema50")
+                    lt_atr3 = None  # Calculate if needed
+                    lt_atr14 = lt_data.get("atr14")
+                    lt_macd_series = indicators.get_series(lt_candles, "macd")
+                    lt_rsi_series = indicators.get_series(lt_candles, "rsi", 14)
 
                     recent_mids = [entry["mid"] for entry in list(price_history.get(asset, []))[-10:]]
                     funding_annualized = round(funding * 24 * 365 * 100, 2) if funding else None
@@ -263,7 +361,8 @@ def main():
                                 "macd": round_series(macd_series, 2),
                                 "rsi7": round_series(rsi7_series, 2),
                                 "rsi14": round_series(rsi14_series, 2)
-                            }
+                            },
+                            "market_metrics": intraday_market_metrics  # NEW: 5m market metrics
                         },
                         "long_term": {
                             "ema20": round_or_none(lt_ema20, 2),
@@ -271,7 +370,8 @@ def main():
                             "atr3": round_or_none(lt_atr3, 2),
                             "atr14": round_or_none(lt_atr14, 2),
                             "macd_series": round_series(lt_macd_series, 2),
-                            "rsi_series": round_series(lt_rsi_series, 2)
+                            "rsi_series": round_series(lt_rsi_series, 2),
+                            "market_metrics": lt_market_metrics  # NEW: 4h market metrics
                         },
                         "open_interest": round_or_none(oi, 2),
                         "funding_rate": round_or_none(funding, 8),
@@ -282,6 +382,16 @@ def main():
                     add_event(f"Data gather error {asset}: {e}")
                     continue
 
+            # Fetch X/Twitter sentiment observations (non-prescriptive)
+            x_observations = {}
+            try:
+                x_observations = await sentiment.get_sentiment_data(args.assets)
+                if x_observations:
+                    logging.info(f"Fetched X sentiment observations for analysis")
+            except Exception as e:
+                logging.debug(f"X sentiment unavailable (non-critical): {e}")
+                # Continue without sentiment - it's supplementary data
+            
             # Single LLM call with all assets
             context_payload = OrderedDict([
                 ("invocation", {
@@ -291,6 +401,7 @@ def main():
                 }),
                 ("account", dashboard),
                 ("market_data", market_sections),
+                ("x_observations", x_observations) if x_observations else ("x_observations", {"note": "No X data available"}),
                 ("instructions", {
                     "assets": args.assets,
                     "requirement": "Decide actions for all assets and return a strict JSON array matching the schema."
@@ -370,50 +481,68 @@ def main():
                         if alloc_usd <= 0:
                             add_event(f"Holding {asset}: zero/negative allocation")
                             continue
+                        if alloc_usd < 10:
+                            add_event(f"WARNING: {asset} allocation ${alloc_usd:.2f} below minimum $10 - skipping trade")
+                            continue
                         amount = alloc_usd / current_price
 
                         order = await hyperliquid.place_buy_order(asset, amount) if is_buy else await hyperliquid.place_sell_order(asset, amount)
-                        # Confirm by checking recent fills for this asset shortly after placing
-                        await asyncio.sleep(1)
-                        fills_check = await hyperliquid.get_recent_fills(limit=10)
-                        filled = False
-                        for fc in reversed(fills_check):
-                            try:
-                                if (fc.get('coin') == asset or fc.get('asset') == asset):
-                                    filled = True
-                                    break
-                            except Exception:
-                                continue
+                        # Check if the order filled by examining the order response directly
+                        filled = hyperliquid.check_order_filled(order)
                         trade_log.append({"type": action, "price": current_price, "amount": amount, "exit_plan": output["exit_plan"], "filled": filled})
                         tp_oid = None
                         sl_oid = None
-                        if output["tp_price"]:
-                            tp_order = await hyperliquid.place_take_profit(asset, is_buy, amount, output["tp_price"])
-                            tp_oids = hyperliquid.extract_oids(tp_order)
-                            tp_oid = tp_oids[0] if tp_oids else None
-                            add_event(f"TP placed {asset} at {output['tp_price']}")
-                        if output["sl_price"]:
-                            sl_order = await hyperliquid.place_stop_loss(asset, is_buy, amount, output["sl_price"])
-                            sl_oids = hyperliquid.extract_oids(sl_order)
-                            sl_oid = sl_oids[0] if sl_oids else None
-                            add_event(f"SL placed {asset} at {output['sl_price']}")
-                        # Reconcile: if opposite-side position exists or TP/SL just filled, clear stale active_trades for this asset
-                        for existing in active_trades[:]:
-                            if existing.get('asset') == asset:
-                                try:
-                                    active_trades.remove(existing)
-                                except ValueError:
-                                    pass
-                        active_trades.append({
-                            "asset": asset,
-                            "is_long": is_buy,
-                            "amount": amount,
-                            "entry_price": current_price,
-                            "tp_oid": tp_oid,
-                            "sl_oid": sl_oid,
-                            "exit_plan": output["exit_plan"],
-                            "opened_at": datetime.now().isoformat()
-                        })
+                        
+                        # Only place TP/SL if the main order filled successfully
+                        if filled:
+                            # PRE-TRADE CLEANUP: Cancel all existing TP/SL orders for this asset before placing new ones
+                            try:
+                                existing_tp_sl = [o for o in open_orders if o.get('coin') == asset and 
+                                                 isinstance(o.get('orderType', ''), str) and 
+                                                 ('Take Profit' in o.get('orderType', '') or 'Stop Market' in o.get('orderType', ''))]
+                                if existing_tp_sl:
+                                    add_event(f"Cancelling {len(existing_tp_sl)} existing TP/SL orders for {asset} before placing new ones")
+                                    for old_order in existing_tp_sl:
+                                        try:
+                                            await hyperliquid.cancel_order(asset, old_order.get('oid'))
+                                            add_event(f"Cancelled old {old_order.get('orderType')} for {asset}")
+                                        except Exception as e:
+                                            logging.error(f"Failed to cancel old order {old_order.get('oid')}: {e}")
+                            except Exception as e:
+                                logging.error(f"Pre-trade cleanup error for {asset}: {e}")
+                            
+                            # Now place new TP/SL orders
+                            if output["tp_price"]:
+                                tp_order = await hyperliquid.place_take_profit(asset, is_buy, amount, output["tp_price"])
+                                tp_oids = hyperliquid.extract_oids(tp_order)
+                                tp_oid = tp_oids[0] if tp_oids else None
+                                add_event(f"TP placed {asset} at {output['tp_price']}")
+                            if output["sl_price"]:
+                                sl_order = await hyperliquid.place_stop_loss(asset, is_buy, amount, output["sl_price"])
+                                sl_oids = hyperliquid.extract_oids(sl_order)
+                                sl_oid = sl_oids[0] if sl_oids else None
+                                add_event(f"SL placed {asset} at {output['sl_price']}")
+                        else:
+                            add_event(f"WARNING: {asset} main order did not fill - skipping TP/SL orders")
+                        # Only add to active_trades if the order filled
+                        if filled:
+                            # Reconcile: if opposite-side position exists or TP/SL just filled, clear stale active_trades for this asset
+                            for existing in active_trades[:]:
+                                if existing.get('asset') == asset:
+                                    try:
+                                        active_trades.remove(existing)
+                                    except ValueError:
+                                        pass
+                            active_trades.append({
+                                "asset": asset,
+                                "is_long": is_buy,
+                                "amount": amount,
+                                "entry_price": current_price,
+                                "tp_oid": tp_oid,
+                                "sl_oid": sl_oid,
+                                "exit_plan": output["exit_plan"],
+                                "opened_at": datetime.now().isoformat()
+                            })
                         add_event(f"{action.upper()} {asset} amount {amount:.4f} at ~{current_price}")
                         if rationale:
                             add_event(f"Post-trade rationale for {asset}: {rationale}")
@@ -438,21 +567,121 @@ def main():
                             }
                             f.write(json.dumps(diary_entry) + "\n")
                     else:
+                        # HOLD action - but check if LLM wants to update TP/SL orders
                         add_event(f"Hold {asset}: {output.get('rationale', '')}")
+                        
+                        # Check if LLM provided new TP/SL prices for existing position
+                        new_tp = output.get("tp_price")
+                        new_sl = output.get("sl_price")
+                        
+                        if new_tp or new_sl:
+                            # Find existing position for this asset
+                            position = None
+                            for pos in state['positions']:
+                                if pos.get('coin') == asset and abs(float(pos.get('szi', 0))) > 0:
+                                    position = pos
+                                    break
+                            
+                            if position:
+                                # We have a position - update TP/SL orders
+                                position_size = abs(float(position.get('szi', 0)))
+                                is_long = float(position.get('szi', 0)) > 0
+                                
+                                # Cancel existing TP/SL orders for this asset
+                                try:
+                                    existing_tp_sl = [o for o in open_orders if o.get('coin') == asset and 
+                                                     isinstance(o.get('orderType', ''), str) and 
+                                                     ('Take Profit' in o.get('orderType', '') or 'Stop Market' in o.get('orderType', ''))]
+                                    if existing_tp_sl:
+                                        add_event(f"Updating TP/SL for {asset} - cancelling {len(existing_tp_sl)} existing orders")
+                                        for old_order in existing_tp_sl:
+                                            try:
+                                                await hyperliquid.cancel_order(asset, old_order.get('oid'))
+                                            except Exception as e:
+                                                logging.error(f"Failed to cancel old order {old_order.get('oid')}: {e}")
+                                except Exception as e:
+                                    logging.error(f"Error cancelling old TP/SL for {asset}: {e}")
+                                
+                                # Place new TP/SL orders
+                                tp_oid = None
+                                sl_oid = None
+                                if new_tp:
+                                    try:
+                                        tp_order = await hyperliquid.place_take_profit(asset, is_long, position_size, new_tp)
+                                        tp_oids = hyperliquid.extract_oids(tp_order)
+                                        tp_oid = tp_oids[0] if tp_oids else None
+                                        add_event(f"Updated TP for {asset} at {new_tp}")
+                                    except Exception as e:
+                                        logging.error(f"Failed to place new TP for {asset}: {e}")
+                                
+                                if new_sl:
+                                    try:
+                                        sl_order = await hyperliquid.place_stop_loss(asset, is_long, position_size, new_sl)
+                                        sl_oids = hyperliquid.extract_oids(sl_order)
+                                        sl_oid = sl_oids[0] if sl_oids else None
+                                        add_event(f"Updated SL for {asset} at {new_sl}")
+                                    except Exception as e:
+                                        logging.error(f"Failed to place new SL for {asset}: {e}")
+                                
+                                # Update active_trades with new TP/SL oids
+                                for tr in active_trades:
+                                    if tr.get('asset') == asset:
+                                        if tp_oid:
+                                            tr['tp_oid'] = tp_oid
+                                        if sl_oid:
+                                            tr['sl_oid'] = sl_oid
+                                        break
+                        
                         # Write hold to diary
                         with open(diary_path, "a") as f:
                             diary_entry = {
                                 "timestamp": datetime.now().isoformat(),
                                 "asset": asset,
                                 "action": "hold",
-                                "rationale": output.get("rationale", "")
+                                "rationale": output.get("rationale", ""),
+                                "tp_price": output.get("tp_price"),
+                                "sl_price": output.get("sl_price"),
+                                "updated_orders": bool(new_tp or new_sl)
                             }
                             f.write(json.dumps(diary_entry) + "\n")
                 except Exception as e:
                     import traceback
                     add_event(f"Execution error {asset}: {e}")
 
-            await asyncio.sleep(get_interval_seconds(args.interval))
+            # Show countdown timer between runs
+            interval_seconds = get_interval_seconds(args.interval)
+            print(f"\n{'='*60}")
+            print(f"Next run in {args.interval}. Countdown starting...")
+            print(f"{'='*60}")
+            
+            # Countdown with progress bar
+            for remaining in range(interval_seconds, 0, -1):
+                # Calculate progress
+                progress = (interval_seconds - remaining) / interval_seconds
+                bar_length = 40
+                filled_length = int(bar_length * progress)
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                
+                # Format time remaining
+                if remaining >= 3600:
+                    hours = remaining // 3600
+                    minutes = (remaining % 3600) // 60
+                    seconds = remaining % 60
+                    time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                elif remaining >= 60:
+                    minutes = remaining // 60
+                    seconds = remaining % 60
+                    time_str = f"{minutes:02d}:{seconds:02d}"
+                else:
+                    time_str = f"00:{remaining:02d}"
+                
+                # Print countdown with carriage return to update same line
+                print(f"\r⏱️  [{bar}] {time_str} remaining", end="", flush=True)
+                await asyncio.sleep(1)
+            
+            # Clear the countdown line and show starting message
+            print(f"\r{'  ' * 30}", end="")  # Clear the line
+            print(f"\r🚀 Starting next trading cycle...\n")
 
     async def handle_diary(request):
         """Return diary entries as JSON or newline-delimited text."""
@@ -533,18 +762,20 @@ def main():
         std = math.sqrt(var) if var > 0 else 0
         return mean / std if std > 0 else 0
 
-    async def check_exit_condition(trade, taapi, hyperliquid):
+    async def check_exit_condition(trade, indicators, hyperliquid):
         """Evaluate whether a given trade's exit plan triggers a close."""
         plan = (trade.get("exit_plan") or "").lower()
         if not plan:
             return False
         try:
             if "macd" in plan and "below" in plan:
-                macd = taapi.get_indicators(trade["asset"], "4h")["macd"]["valueMACD"]
+                data = await indicators.get_indicators(trade["asset"], "4h")
+                macd = data.get("macd", 0)
                 threshold = float(plan.split("below")[-1].strip())
                 return macd < threshold
             if "close above ema50" in plan:
-                ema50 = taapi.get_historical_indicator("ema", f"{trade['asset']}/USDT", "4h", results=1, params={"period": 50})[0]["value"]
+                data = await indicators.get_indicators(trade["asset"], "4h")
+                ema50 = data.get("ema50", 0)
                 current = await hyperliquid.get_current_price(trade["asset"])
                 return current > ema50
         except Exception:

@@ -299,6 +299,31 @@ class HyperliquidAPI:
             pass
         return oids
 
+    def check_order_filled(self, order_result):
+        """Check if an order was filled based on the order response.
+
+        Args:
+            order_result: Raw order response payload returned by the exchange.
+
+        Returns:
+            True if the order filled, False if it's resting or failed.
+        """
+        try:
+            statuses = order_result["response"]["data"]["statuses"]
+            for st in statuses:
+                # Check for "filled" status (market orders that executed immediately)
+                if "filled" in st:
+                    return True
+                # Check for "resting" status (limit orders on the book)
+                if "resting" in st:
+                    return False
+            # If no explicit status found, assume it didn't fill
+            return False
+        except (KeyError, TypeError, ValueError) as e:
+            # If we can't parse the response, log it and assume it didn't fill
+            logging.warning(f"Failed to parse order response for fill check: {e}")
+            return False
+
     async def get_user_state(self):
         """Retrieve wallet state with enriched position PnL calculations.
 
@@ -392,4 +417,25 @@ class HyperliquidAPI:
             return None
         except (RuntimeError, ValueError, KeyError, ConnectionError, TypeError) as e:
             logging.error("Funding fetch error for %s: %s", asset, e)
+            return None
+
+    async def get_user_fees(self):
+        """Retrieve user's current fee rates.
+        
+        Returns:
+            Dictionary with taker_fee and maker_fee rates as floats,
+            or None if unable to fetch.
+        """
+        try:
+            response = await self._retry(lambda: self.info.user_fees(self.wallet.address))
+            if response:
+                return {
+                    "taker_fee": float(response.get("userCrossRate", 0.00045)),
+                    "maker_fee": float(response.get("userAddRate", 0.00015)),
+                    "taker_fee_pct": float(response.get("userCrossRate", 0.00045)) * 100,
+                    "maker_fee_pct": float(response.get("userAddRate", 0.00015)) * 100,
+                }
+            return None
+        except Exception as e:
+            logging.error(f"Error fetching user fees: {e}")
             return None

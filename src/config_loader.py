@@ -77,6 +77,8 @@ CONFIG = {
     "hyperliquid_network": _get_env("HYPERLIQUID_NETWORK", "mainnet"),
     # LLM via OpenRouter
     "openrouter_api_key": _get_env("OPENROUTER_API_KEY", required=True),
+    # Grok API for X/Twitter sentiment (optional)
+    "grok_api_key": _get_env("GROK_API_KEY"),
     "openrouter_base_url": _get_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
     "openrouter_referer": _get_env("OPENROUTER_REFERER"),
     "openrouter_app_title": _get_env("OPENROUTER_APP_TITLE", "trading-agent"),
