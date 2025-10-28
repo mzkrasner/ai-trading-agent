@@ -171,6 +171,18 @@ class HyperliquidAPI:
         amount = self.round_size(asset, amount)
         return await self._retry(lambda: self.exchange.market_open(asset, False, amount, None, slippage))
 
+    async def close_position(self, asset, slippage=0.01):
+        """Close the entire position for an asset at market price.
+
+        Args:
+            asset: Market symbol to close.
+            slippage: Maximum acceptable slippage expressed as a decimal.
+
+        Returns:
+            Raw SDK response from :meth:`Exchange.market_close`.
+        """
+        return await self._retry(lambda: self.exchange.market_close(asset, slippage))
+
     async def place_take_profit(self, asset, is_buy, amount, tp_price):
         """Create a reduce-only trigger order that executes a take-profit exit.
 

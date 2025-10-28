@@ -37,7 +37,8 @@ class TradingAgent:
     def _decide(self, context, assets):
         """Dispatch decision request to the LLM and enforce output contract."""
         system_prompt = (
-            "You are an aggressive momentum trader who thrives on volatility and seeks asymmetric risk/reward opportunities in perpetual futures. You hunt for explosive moves while maintaining positive expected value through disciplined exits.\n"
+            "You are an autonomous crypto trading agent managing a live portfolio on Hyperliquid.\n"
+            "Mission: Maximize returns through intelligent position management.\n"
             "You will receive market + account context for SEVERAL assets, including:\n"
             f"- assets = {json.dumps(assets)}\n"
             "- per-asset intraday (5m) and higher-timeframe (4h) metrics\n"
@@ -77,24 +78,26 @@ class TradingAgent:
             "• RSI extremes (<20 or >80) in trending markets can signal continuation rather than reversal\n"
             "• Whale accumulation during oversold conditions often precedes sharp rebounds\n"
             "• X sentiment velocity shifts frequently lead price by 15-60 minutes\n\n"
-            "Capital Deployment Philosophy:\n"
-            "You recognize that the majority of returns come from a small number of high-conviction trades.\n"
-            "When multiple signals strongly align, deploying significant capital with appropriate risk management can be optimal.\n"
-            "Conservative position sizing during unclear conditions preserves capital for exceptional opportunities.\n\n"
-            "Trade Selection Mindset:\n"
-            "Focus on setups with asymmetric risk/reward (favorable upside relative to downside).\n"
-            "Quick stops preserve capital - wrong trades deserve rapid exits.\n"
-            "Winning trades deserve patience and potential size increases.\n"
             "Account leverage can be calibrated based on win rate and market conditions.\n\n"
             "Always use the 'current time' provided in the user message to evaluate any time-based conditions, such as cooldown expirations or timed exit plans.\n\n"
-            "For each asset, decide: buy, sell, or hold.\n"
-            "CRITICAL: Minimum order size is $10 - any allocation_usd below $10 will fail.\n"
-            "Specify allocation_usd (must be >= $10), tp_price (or null), sl_price (or null), and exit_plan for any trades.\n\n"
+            "Trading Actions:\n"
+            "You have four actions available for each asset:\n"
+            "- BUY: Open or add to a LONG position (profit when price rises). Requires allocation_usd >= $10, tp_price, sl_price.\n"
+            "- SELL: Open or add to a SHORT position (profit when price falls). Requires allocation_usd >= $10, tp_price, sl_price.\n"
+            "- CLOSE: Exit the entire current position at market price (whether long or short). Sets allocation_usd to 0, tp_price and sl_price to null.\n"
+            "- HOLD: Maintain current position or stay flat. Can optionally update tp_price/sl_price on existing positions.\n\n"
+            "CRITICAL: Minimum order size is $10 - any allocation_usd below $10 will fail for BUY/SELL actions.\n\n"
             "HOLD action flexibility:\n"
             "When action is 'hold', you can still update tp_price and sl_price to adjust risk management on existing positions.\n"
             "- Set new tp_price/sl_price to move stops or targets without closing the position\n"
             "- Set to null to leave existing TP/SL orders unchanged\n"
             "- This allows you to trail stops, lock in profits, or adjust targets based on changing market conditions\n\n"
+            "Leverage & Position Sizing:\n"
+            "- This is perpetual futures trading - you can use leverage to control larger positions than your cash balance\n"
+            "- Suggested range: 3-10x total leverage for meaningful returns while managing risk\n"
+            "- allocation_usd represents notional exposure (the position size), not cash used\n"
+            "- Example: $40 account with 5x leverage = $200 total buying power available\n"
+            "- Position sizes should be large enough that potential profits are meaningful relative to account size\n\n"
             "Output contract\n"
             "- Output a STRICT JSON object with exactly two properties in this order:\n"
             "  • reasoning: long-form string capturing detailed, step-by-step analysis that means you can acknowledge existing information as clarity, or acknowledge that you need more information to make a decision (be verbose).\n"
@@ -172,7 +175,7 @@ class TradingAgent:
                                 "type": "object",
                                 "properties": {
                                     "asset": {"type": "string", "enum": assets_list},
-                                    "action": {"type": "string", "enum": ["buy", "sell", "hold"]},
+                                    "action": {"type": "string", "enum": ["buy", "sell", "close", "hold"]},
                                     "allocation_usd": {"type": "number"},
                                     "tp_price": {"type": ["number", "null"]},
                                     "sl_price": {"type": ["number", "null"]},
@@ -233,8 +236,8 @@ class TradingAgent:
             """Assemble the JSON schema used for structured LLM responses."""
             base_properties = {
                 "asset": {"type": "string", "enum": assets},
-                "action": {"type": "string", "enum": ["buy", "sell", "hold"]},
-                "allocation_usd": {"type": "number", "minimum": 0},  # 0 for hold, >= 10 for buy/sell
+                "action": {"type": "string", "enum": ["buy", "sell", "close", "hold"]},
+                "allocation_usd": {"type": "number", "minimum": 0},  # 0 for hold/close, >= 10 for buy/sell
                 "tp_price": {"type": ["number", "null"]},
                 "sl_price": {"type": ["number", "null"]},
                 "exit_plan": {"type": "string"},
@@ -261,7 +264,7 @@ class TradingAgent:
             }
 
         for _ in range(6):
-            data = {"model": self.model, "messages": messages}
+            data = {"model": self.model, "messages": messages, "max_tokens": 4096}
             if allow_structured:
                 data["response_format"] = {
                     "type": "json_schema",

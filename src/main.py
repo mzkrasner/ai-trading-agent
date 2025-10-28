@@ -566,6 +566,76 @@ def main():
                                 "filled": filled
                             }
                             f.write(json.dumps(diary_entry) + "\n")
+                    elif action == "close":
+                        # CLOSE action - exit the entire position at market
+                        add_event(f"Close {asset}: {output.get('rationale', '')}")
+                        
+                        # Check if there's an existing position to close
+                        position = None
+                        for pos in state['positions']:
+                            if pos.get('coin') == asset and abs(float(pos.get('szi', 0))) > 0:
+                                position = pos
+                                break
+                        
+                        if position:
+                            try:
+                                # Close the position at market
+                                close_result = await hyperliquid.close_position(asset)
+                                filled = hyperliquid.check_order_filled(close_result)
+                                
+                                if filled:
+                                    add_event(f"Successfully closed {asset} position")
+                                    
+                                    # Cancel any existing TP/SL orders for this asset
+                                    try:
+                                        existing_tp_sl = [o for o in open_orders if o.get('coin') == asset and 
+                                                         isinstance(o.get('orderType', ''), str) and 
+                                                         ('Take Profit' in o.get('orderType', '') or 'Stop Market' in o.get('orderType', ''))]
+                                        for old_order in existing_tp_sl:
+                                            try:
+                                                await hyperliquid.cancel_order(asset, old_order.get('oid'))
+                                                add_event(f"Cancelled {old_order.get('orderType')} for closed {asset} position")
+                                            except Exception as e:
+                                                logging.error(f"Failed to cancel order {old_order.get('oid')}: {e}")
+                                    except Exception as e:
+                                        logging.error(f"Error cancelling TP/SL after close for {asset}: {e}")
+                                    
+                                    # Remove from active_trades
+                                    for tr in active_trades[:]:
+                                        if tr.get('asset') == asset:
+                                            try:
+                                                active_trades.remove(tr)
+                                            except ValueError:
+                                                pass
+                                    
+                                    # Write to diary
+                                    with open(diary_path, "a") as f:
+                                        diary_entry = {
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                            "asset": asset,
+                                            "action": "close",
+                                            "rationale": output.get("rationale", ""),
+                                            "close_result": str(close_result),
+                                            "filled": filled
+                                        }
+                                        f.write(json.dumps(diary_entry) + "\n")
+                                else:
+                                    add_event(f"WARNING: {asset} close order did not fill")
+                            except Exception as e:
+                                logging.error(f"Failed to close {asset} position: {e}")
+                                add_event(f"ERROR: Failed to close {asset}: {e}")
+                        else:
+                            add_event(f"No {asset} position to close")
+                            # Still write to diary
+                            with open(diary_path, "a") as f:
+                                diary_entry = {
+                                    "timestamp": datetime.now().isoformat(),
+                                    "asset": asset,
+                                    "action": "close",
+                                    "rationale": output.get("rationale", ""),
+                                    "result": "no_position_to_close"
+                                }
+                                f.write(json.dumps(diary_entry) + "\n")
                     else:
                         # HOLD action - but check if LLM wants to update TP/SL orders
                         add_event(f"Hold {asset}: {output.get('rationale', '')}")
