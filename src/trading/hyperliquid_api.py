@@ -516,6 +516,64 @@ class HyperliquidAPI:
             logging.error(f"Error fetching user fees: {e}")
             return None
 
+    async def get_recent_trades_analysis(self, asset, limit=50):
+        """Analyze recent trade flow for buy/sell pressure and whale activity.
+        
+        Args:
+            asset: Market symbol to query
+            limit: Number of recent trades to analyze
+            
+        Returns:
+            Dictionary with trade flow metrics or None if unavailable
+        """
+        try:
+            # Call API endpoint directly using post method (sync call, needs thread execution)
+            trades = await self._retry(
+                lambda: self.info.post("/info", {"type": "recentTrades", "coin": asset})
+            )
+            
+            if not trades or not isinstance(trades, list):
+                return None
+            
+            # Take most recent N trades
+            recent = trades[:limit] if len(trades) > limit else trades
+            
+            if len(recent) < 2:
+                return None
+            
+            # Separate buys (side="B") and sells (side="A")
+            buys = [t for t in recent if isinstance(t, dict) and t.get('side') == 'B']
+            sells = [t for t in recent if isinstance(t, dict) and t.get('side') == 'A']
+            
+            # Calculate volumes
+            buy_volume = sum(float(t.get('sz', 0)) for t in buys)
+            sell_volume = sum(float(t.get('sz', 0)) for t in sells)
+            total_volume = buy_volume + sell_volume
+            
+            # Find large trades (whale activity)
+            all_sizes = [float(t.get('sz', 0)) for t in recent if isinstance(t, dict)]
+            avg_size = sum(all_sizes) / len(all_sizes) if all_sizes else 0
+            
+            large_buys = [{"price": round(float(t['px']), 2), "size": round(float(t['sz']), 4)} 
+                         for t in buys if float(t.get('sz', 0)) > avg_size * 5][:3]
+            large_sells = [{"price": round(float(t['px']), 2), "size": round(float(t['sz']), 4)} 
+                          for t in sells if float(t.get('sz', 0)) > avg_size * 5][:3]
+            
+            return {
+                "buy_sell_ratio": round(buy_volume / sell_volume, 2) if sell_volume > 0 else 0,
+                "buy_volume_pct": round(buy_volume / total_volume * 100, 1) if total_volume > 0 else 0,
+                "sell_volume_pct": round(sell_volume / total_volume * 100, 1) if total_volume > 0 else 0,
+                "num_buys": len(buys),
+                "num_sells": len(sells),
+                "large_buys": large_buys,  # Whale buying
+                "large_sells": large_sells,  # Whale selling
+                "avg_trade_size": round(avg_size, 4),
+                "total_trades_analyzed": len(recent),
+            }
+        except Exception as e:
+            logging.error(f"Error analyzing recent trades for {asset}: {e}")
+            return None
+
     async def get_order_book_depth(self, asset, depth_levels=10):
         """Fetch order book and analyze bid/ask depth and imbalances.
         

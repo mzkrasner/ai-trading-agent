@@ -303,11 +303,22 @@ def main():
 
             # Gather data for ALL assets first
             market_sections = []
-            asset_prices = {}
+            
+            # Fetch all prices in one call (optimization - saves 5 API calls per cycle)
+            try:
+                all_prices = await hyperliquid._retry(hyperliquid.info.all_mids)
+                asset_prices = {asset: float(all_prices.get(asset, 0.0)) for asset in args.assets}
+            except Exception as e:
+                logging.error(f"Error fetching all prices: {e}")
+                asset_prices = {}
+            
             for asset in args.assets:
                 try:
-                    current_price = await hyperliquid.get_current_price(asset)
-                    asset_prices[asset] = current_price
+                    current_price = asset_prices.get(asset, 0.0)
+                    if not current_price:
+                        # Fallback if all_mids failed for this asset
+                        current_price = await hyperliquid.get_current_price(asset)
+                        asset_prices[asset] = current_price
                     if asset not in price_history:
                         price_history[asset] = deque(maxlen=60)
                     price_history[asset].append({"t": datetime.now(timezone.utc).isoformat(), "mid": round_or_none(current_price, 2)})
@@ -348,9 +359,10 @@ def main():
                     recent_mids = [entry["mid"] for entry in list(price_history.get(asset, []))[-10:]]
                     funding_annualized = round(funding * 24 * 365 * 100, 2) if funding else None
                     
-                    # Fetch order book depth and funding history
+                    # Fetch order book depth, funding history, and recent trade flow
                     order_book = await hyperliquid.get_order_book_depth(asset)
                     funding_history = await hyperliquid.get_funding_history(asset, hours_back=24)
+                    trade_flow = await hyperliquid.get_recent_trades_analysis(asset, limit=50)
 
                     market_sections.append({
                         "asset": asset,
@@ -382,7 +394,8 @@ def main():
                         "funding_annualized_pct": funding_annualized,
                         "funding_history": funding_history if funding_history else {"note": "Funding history unavailable"},
                         "recent_mid_prices": recent_mids,
-                        "order_book": order_book if order_book else {"note": "Order book unavailable"}
+                        "order_book": order_book if order_book else {"note": "Order book unavailable"},
+                        "trade_flow": trade_flow if trade_flow else {"note": "Trade flow unavailable"}
                     })
                 except Exception as e:
                     add_event(f"Data gather error {asset}: {e}")
