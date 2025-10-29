@@ -347,6 +347,9 @@ def main():
 
                     recent_mids = [entry["mid"] for entry in list(price_history.get(asset, []))[-10:]]
                     funding_annualized = round(funding * 24 * 365 * 100, 2) if funding else None
+                    
+                    # Fetch order book depth
+                    order_book = await hyperliquid.get_order_book_depth(asset)
 
                     market_sections.append({
                         "asset": asset,
@@ -376,7 +379,8 @@ def main():
                         "open_interest": round_or_none(oi, 2),
                         "funding_rate": round_or_none(funding, 8),
                         "funding_annualized_pct": funding_annualized,
-                        "recent_mid_prices": recent_mids
+                        "recent_mid_prices": recent_mids,
+                        "order_book": order_book if order_book else {"note": "Order book unavailable"}
                     })
                 except Exception as e:
                     add_event(f"Data gather error {asset}: {e}")

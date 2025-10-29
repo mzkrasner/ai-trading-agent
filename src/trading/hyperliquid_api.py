@@ -456,3 +456,63 @@ class HyperliquidAPI:
         except Exception as e:
             logging.error(f"Error fetching user fees: {e}")
             return None
+
+    async def get_order_book_depth(self, asset, depth_levels=10):
+        """Fetch order book and analyze bid/ask depth and imbalances.
+        
+        Args:
+            asset: Market symbol to query
+            depth_levels: Number of price levels to analyze on each side
+            
+        Returns:
+            Dictionary with order book metrics or None if unavailable
+        """
+        try:
+            book = await self._retry(lambda: self.info.l2_snapshot(asset))
+            if not book or 'levels' not in book:
+                return None
+            
+            # Order book structure: {"coin": ..., "time": ..., "levels": [[bids...], [asks...]]}
+            levels = book['levels']
+            if not isinstance(levels, list) or len(levels) < 2:
+                return None
+            
+            bids = levels[0][:depth_levels] if isinstance(levels[0], list) else []
+            asks = levels[1][:depth_levels] if len(levels) > 1 and isinstance(levels[1], list) else []
+            
+            if not bids or not asks:
+                return None
+            
+            # Each level is a dict with 'px' (price), 'sz' (size), 'n' (num orders)
+            total_bid_size = sum(float(b.get('sz', 0)) for b in bids if isinstance(b, dict))
+            total_ask_size = sum(float(a.get('sz', 0)) for a in asks if isinstance(a, dict))
+            
+            # Find largest walls (3x average size)
+            avg_bid = total_bid_size / len(bids) if bids else 0
+            avg_ask = total_ask_size / len(asks) if asks else 0
+            
+            bid_walls = [{"price": round(float(b['px']), 2), "size": round(float(b['sz']), 4)} 
+                        for b in bids if isinstance(b, dict) and float(b.get('sz', 0)) > avg_bid * 3][:3]
+            ask_walls = [{"price": round(float(a['px']), 2), "size": round(float(a['sz']), 4)} 
+                        for a in asks if isinstance(a, dict) and float(a.get('sz', 0)) > avg_ask * 3][:3]
+            
+            # Calculate imbalance ratio
+            imbalance_ratio = total_bid_size / total_ask_size if total_ask_size > 0 else 0
+            
+            top_bid = round(float(bids[0]['px']), 2) if bids and isinstance(bids[0], dict) and 'px' in bids[0] else None
+            top_ask = round(float(asks[0]['px']), 2) if asks and isinstance(asks[0], dict) and 'px' in asks[0] else None
+            spread_pct = round((float(asks[0]['px']) - float(bids[0]['px'])) / float(bids[0]['px']) * 100, 3) if top_bid and top_ask else None
+            
+            return {
+                "bid_ask_imbalance": round(imbalance_ratio, 2),  # >1 = more buyers, <1 = more sellers
+                "total_bid_liquidity": round(total_bid_size, 4),
+                "total_ask_liquidity": round(total_ask_size, 4),
+                "top_bid": top_bid,
+                "top_ask": top_ask,
+                "spread_pct": spread_pct,
+                "bid_walls": bid_walls,  # Major support levels
+                "ask_walls": ask_walls,  # Major resistance levels
+            }
+        except Exception as e:
+            logging.error(f"Error fetching order book for {asset}: {e}")
+            return None
