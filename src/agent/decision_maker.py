@@ -51,6 +51,7 @@ class TradingAgent:
             "Market Metrics Glossary (purely informational - interpret as you see fit):\n"
             "• ema_separation_ratio: Distance between EMA20 and EMA50 as ratio (positive = 20 above 50)\n"
             "• price_ema20/50_deviation: Price position relative to moving averages\n"
+            "• vwap: Volume-Weighted Average Price (institutional fair value benchmark - price above VWAP = bulls in control)\n"
             "• volatility_ratio: Current candle range vs 20-period average (>1 = expanding volatility)\n"
             "• atr_price_ratio: ATR as percentage of price\n"
             "• rsi_distance_from_50: How far RSI is from neutral (positive = bullish territory)\n"

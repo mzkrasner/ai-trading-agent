@@ -211,6 +211,53 @@ class HyperliquidIndicators:
         
         return round(atr, 2)
     
+    def calculate_vwap(self, candles: List[Dict], lookback: Optional[int] = None) -> Optional[float]:
+        """Calculate Volume-Weighted Average Price from candles.
+        
+        Args:
+            candles: List of candle dicts with 'h', 'l', 'c', 'v' fields
+            lookback: Number of candles to use (None = all candles)
+            
+        Returns:
+            VWAP value or None if insufficient data
+        """
+        try:
+            if not candles or len(candles) < 2:
+                return None
+            
+            # Use most recent N candles
+            candles_to_use = candles[-lookback:] if lookback else candles
+            
+            total_pv = 0.0  # price × volume
+            total_volume = 0.0
+            
+            for candle in candles_to_use:
+                try:
+                    high = float(candle.get('h', 0))
+                    low = float(candle.get('l', 0))
+                    close = float(candle.get('c', 0))
+                    volume = float(candle.get('v', 0))
+                    
+                    if volume <= 0:
+                        continue
+                    
+                    # Typical price = (H + L + C) / 3
+                    typical_price = (high + low + close) / 3
+                    
+                    total_pv += typical_price * volume
+                    total_volume += volume
+                except (ValueError, TypeError, KeyError):
+                    continue
+            
+            if total_volume == 0:
+                return None
+            
+            vwap = total_pv / total_volume
+            return round(vwap, 2)
+            
+        except Exception:
+            return None
+    
     async def get_indicators(self, coin: str, interval: str) -> Dict:
         """Get all key indicators for a coin and interval.
         

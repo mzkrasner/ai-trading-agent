@@ -340,6 +340,9 @@ def main():
                     # Calculate market metrics for 5m timeframe
                     intraday_market_metrics = indicators.calculate_market_metrics(intraday_candles, intraday_data)
                     
+                    # Calculate VWAP from Hyperliquid volume data (rolling 100 candles)
+                    vwap_5m = indicators.calculate_vwap(intraday_candles, lookback=100)
+                    
                     # Fetch 4h indicators from Hyperliquid
                     lt_candles = await indicators.get_candles(asset, "4h", num_candles=100)
                     # Pass candles to avoid duplicate API call
@@ -347,6 +350,9 @@ def main():
                     
                     # Calculate market metrics for 4h timeframe
                     lt_market_metrics = indicators.calculate_market_metrics(lt_candles, lt_data)
+                    
+                    # Calculate VWAP for 4h timeframe (rolling 100 candles)
+                    vwap_4h = indicators.calculate_vwap(lt_candles, lookback=100)
                     
                     # Extract long-term values
                     lt_ema20 = lt_data.get("ema20")
@@ -372,6 +378,7 @@ def main():
                             "macd": round_or_none(macd_series[-1], 2) if macd_series else None,
                             "rsi7": round_or_none(rsi7_series[-1], 2) if rsi7_series else None,
                             "rsi14": round_or_none(rsi14_series[-1], 2) if rsi14_series else None,
+                            "vwap": round_or_none(vwap_5m, 2),
                             "series": {
                                 "ema20": round_series(ema_series, 2),
                                 "macd": round_series(macd_series, 2),
@@ -385,6 +392,7 @@ def main():
                             "ema50": round_or_none(lt_ema50, 2),
                             "atr3": round_or_none(lt_atr3, 2),
                             "atr14": round_or_none(lt_atr14, 2),
+                            "vwap": round_or_none(vwap_4h, 2),
                             "macd_series": round_series(lt_macd_series, 2),
                             "rsi_series": round_series(lt_rsi_series, 2),
                             "market_metrics": lt_market_metrics  # NEW: 4h market metrics
