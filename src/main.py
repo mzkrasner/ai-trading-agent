@@ -384,10 +384,24 @@ def main():
 
             # Fetch X/Twitter sentiment observations (non-prescriptive)
             x_observations = {}
+            market_context = {}
             try:
-                x_observations = await sentiment.get_sentiment_data(args.assets)
-                if x_observations:
-                    logging.info(f"Fetched X sentiment observations for analysis")
+                # Fetch both asset-specific sentiment and general market context in parallel
+                x_observations, market_context = await asyncio.gather(
+                    sentiment.get_sentiment_data(args.assets),
+                    sentiment.get_market_context(),
+                    return_exceptions=True
+                )
+                # Handle exceptions from gather
+                if isinstance(x_observations, Exception):
+                    logging.debug(f"X sentiment error: {x_observations}")
+                    x_observations = {}
+                if isinstance(market_context, Exception):
+                    logging.debug(f"Market context error: {market_context}")
+                    market_context = {}
+                    
+                if x_observations or market_context:
+                    logging.info(f"Fetched X sentiment and market context for analysis")
             except Exception as e:
                 logging.debug(f"X sentiment unavailable (non-critical): {e}")
                 # Continue without sentiment - it's supplementary data
@@ -402,6 +416,7 @@ def main():
                 ("account", dashboard),
                 ("market_data", market_sections),
                 ("x_observations", x_observations) if x_observations else ("x_observations", {"note": "No X data available"}),
+                ("market_context", market_context) if market_context else ("market_context", {"note": "No market context available"}),
                 ("instructions", {
                     "assets": args.assets,
                     "requirement": "Decide actions for all assets and return a strict JSON array matching the schema."

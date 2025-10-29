@@ -149,21 +149,35 @@ class XSentimentAnalyzer:
             logging.error(f"Error fetching X sentiment: {e}")
             return {}
     
-    async def get_trending_topics(self) -> Dict:
-        """Get trending crypto topics on X without specific asset focus.
+    async def get_market_context(self) -> Dict:
+        """Get general crypto market sentiment and macro events.
         
         Returns:
-            Dictionary with trending observations from crypto Twitter
+            Dictionary with market-wide context (regulatory, institutional, macro events)
         """
         if not self.enabled:
             return {}
             
         try:
             prompt = (
-                "What cryptocurrency topics are trending on X right now? "
-                "Return observations about: trending hashtags, viral posts, "
-                "major announcements, and general market mood. "
-                "Just report what you see, don't interpret."
+                "What major crypto market news, regulatory developments, or macro events "
+                "are being discussed on X right now? Focus on market-wide factors that could "
+                "affect all cryptocurrencies, not individual coins. Include:\n"
+                "- Regulatory news (SEC, government actions, legal developments)\n"
+                "- Exchange developments (outages, hacks, institutional moves)\n"
+                "- Institutional activity (ETF flows, corporate treasury moves)\n"
+                "- Macro economic factors (Fed policy, global markets)\n"
+                "- General market sentiment shifts (fear/greed, risk-on/risk-off)\n\n"
+                "Return a JSON object:\n"
+                "{\n"
+                "  \"regulatory_events\": [list of regulatory news],\n"
+                "  \"institutional_activity\": [institutional developments],\n"
+                "  \"macro_factors\": [broader economic context],\n"
+                "  \"market_sentiment\": \"overall mood description\",\n"
+                "  \"notable_events\": [any major events affecting crypto broadly],\n"
+                "  \"risk_factors\": [any systemic risks mentioned]\n"
+                "}\n"
+                "Just report what you observe, don't interpret or recommend."
             )
             
             headers = {
@@ -177,8 +191,10 @@ class XSentimentAnalyzer:
                 "search_parameters": {
                     "mode": "on",
                     "sources": [{"type": "x"}],
-                    "limit": 20
-                }
+                    "return_citations": True,
+                    "limit": 30
+                },
+                "temperature": 0.3
             }
             
             async with aiohttp.ClientSession() as session:
@@ -190,12 +206,23 @@ class XSentimentAnalyzer:
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
-                        return {
-                            "trending_observations": result['choices'][0]['message']['content'],
-                            "timestamp": "current"
-                        }
+                        content = result['choices'][0]['message']['content']
+                        citations = result.get('citations', [])
+                        
+                        try:
+                            market_data = json.loads(content)
+                            market_data['citations'] = citations[:10]
+                            return market_data
+                        except json.JSONDecodeError:
+                            return {
+                                "market_context": content,
+                                "citations": citations[:10]
+                            }
                     return {}
                     
+        except asyncio.TimeoutError:
+            logging.warning("Market context request timed out")
+            return {}
         except Exception as e:
-            logging.error(f"Error fetching trending topics: {e}")
+            logging.error(f"Error fetching market context: {e}")
             return {}
