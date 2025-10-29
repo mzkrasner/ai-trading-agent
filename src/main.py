@@ -348,8 +348,9 @@ def main():
                     recent_mids = [entry["mid"] for entry in list(price_history.get(asset, []))[-10:]]
                     funding_annualized = round(funding * 24 * 365 * 100, 2) if funding else None
                     
-                    # Fetch order book depth
+                    # Fetch order book depth and funding history
                     order_book = await hyperliquid.get_order_book_depth(asset)
+                    funding_history = await hyperliquid.get_funding_history(asset, hours_back=24)
 
                     market_sections.append({
                         "asset": asset,
@@ -379,6 +380,7 @@ def main():
                         "open_interest": round_or_none(oi, 2),
                         "funding_rate": round_or_none(funding, 8),
                         "funding_annualized_pct": funding_annualized,
+                        "funding_history": funding_history if funding_history else {"note": "Funding history unavailable"},
                         "recent_mid_prices": recent_mids,
                         "order_book": order_book if order_book else {"note": "Order book unavailable"}
                     })

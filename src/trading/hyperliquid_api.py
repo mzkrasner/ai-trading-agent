@@ -436,6 +436,65 @@ class HyperliquidAPI:
             logging.error("Funding fetch error for %s: %s", asset, e)
             return None
 
+    async def get_funding_history(self, asset, hours_back=24):
+        """Fetch historical funding rates to analyze trends.
+        
+        Args:
+            asset: Market symbol to query
+            hours_back: How many hours of history to fetch
+            
+        Returns:
+            Dictionary with funding trend analysis or None if unavailable
+        """
+        try:
+            import time
+            # Calculate start time (milliseconds)
+            start_time = int((time.time() - (hours_back * 3600)) * 1000)
+            
+            # Fetch funding history
+            history = await self._retry(lambda: self.info.funding_history(asset, start_time))
+            
+            if not history or not isinstance(history, list) or len(history) < 2:
+                return None
+            
+            # Extract funding rates (most recent last)
+            rates = [float(h.get('fundingRate', 0)) for h in history if isinstance(h, dict)]
+            premiums = [float(h.get('premium', 0)) for h in history if isinstance(h, dict)]
+            
+            if not rates:
+                return None
+            
+            # Calculate trend metrics
+            current_rate = rates[-1]
+            avg_rate = sum(rates) / len(rates)
+            min_rate = min(rates)
+            max_rate = max(rates)
+            
+            # Direction: is funding accelerating?
+            if len(rates) >= 3:
+                recent_avg = sum(rates[-3:]) / 3
+                older_avg = sum(rates[:3]) / 3
+                trend = "accelerating" if recent_avg > older_avg else "decelerating" if recent_avg < older_avg else "stable"
+            else:
+                trend = "stable"
+            
+            # Calculate how far current is from average (normalized)
+            deviation_from_avg = (current_rate - avg_rate) / abs(avg_rate) if avg_rate != 0 else 0
+            
+            return {
+                "current_rate": round(current_rate, 8),
+                "avg_rate": round(avg_rate, 8),
+                "min_rate": round(min_rate, 8),
+                "max_rate": round(max_rate, 8),
+                "trend": trend,  # accelerating/decelerating/stable
+                "deviation_from_avg_pct": round(deviation_from_avg * 100, 2),
+                "num_samples": len(rates),
+                "avg_premium": round(sum(premiums) / len(premiums), 6) if premiums else None,
+            }
+        except Exception as e:
+            logging.error(f"Error fetching funding history for {asset}: {e}")
+            return None
+
     async def get_user_fees(self):
         """Retrieve user's current fee rates.
         
