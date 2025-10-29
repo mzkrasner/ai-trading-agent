@@ -18,7 +18,8 @@ class TradingAgent:
         self.base_url = f"{base}/chat/completions"
         self.referer = CONFIG.get("openrouter_referer")
         self.app_title = CONFIG.get("openrouter_app_title")
-        self.taapi = TAAPIClient()
+        # TAAPI is optional - only initialize if API key is provided
+        self.taapi = TAAPIClient() if CONFIG.get("taapi_api_key") else None
         # Fast/cheap sanitizer model to normalize outputs on parse failures
         self.sanitize_model = CONFIG.get("sanitize_model") or "openai/gpt-5"
 
@@ -86,6 +87,9 @@ class TradingAgent:
             "- SELL: Open or add to a SHORT position (profit when price falls). Requires allocation_usd >= $10, tp_price, sl_price.\n"
             "- CLOSE: Exit the entire current position at market price (whether long or short). Sets allocation_usd to 0, tp_price and sl_price to null.\n"
             "- HOLD: Maintain current position or stay flat. Can optionally update tp_price/sl_price on existing positions.\n\n"
+            "Examples (TP/SL placement):\n"
+            "- LONG: ASSET-A at $100 → tp_price: $105 (above entry), sl_price: $97 (below entry)\n"
+            "- SHORT: ASSET-B at $50 → tp_price: $48 (below entry), sl_price: $52 (above entry)\n\n"
             "CRITICAL: Minimum order size is $10 - any allocation_usd below $10 will fail for BUY/SELL actions.\n\n"
             "HOLD action flexibility:\n"
             "When action is 'hold', you can still update tp_price and sl_price to adjust risk management on existing positions.\n"
@@ -229,7 +233,8 @@ class TradingAgent:
                 logging.error("Sanitize failed: %s", se)
                 return {"reasoning": "", "trade_decisions": []}
 
-        allow_tools = True
+        # Only enable tools if TAAPI is available
+        allow_tools = bool(self.taapi)
         allow_structured = True
 
         def _build_schema():
@@ -317,7 +322,7 @@ class TradingAgent:
             messages.append(message)
 
             tool_calls = message.get("tool_calls") or []
-            if allow_tools and tool_calls:
+            if allow_tools and tool_calls and self.taapi:
                 for tc in tool_calls:
                     if tc.get("type") == "function" and tc.get("function", {}).get("name") == "fetch_taapi_indicator":
                         args = json.loads(tc["function"].get("arguments") or "{}")

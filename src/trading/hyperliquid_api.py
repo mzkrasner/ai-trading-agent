@@ -326,14 +326,19 @@ class HyperliquidAPI:
                 # Check for "filled" status (market orders that executed immediately)
                 if "filled" in st:
                     return True
+                # Check for "error" status and log it
+                if "error" in st:
+                    logging.error(f"Order failed with error: {st['error']}")
+                    return False
                 # Check for "resting" status (limit orders on the book)
                 if "resting" in st:
                     return False
-            # If no explicit status found, assume it didn't fill
+            # If no explicit status found, log the actual response for debugging
+            logging.warning(f"Unexpected order status structure: {statuses}")
             return False
         except (KeyError, TypeError, ValueError) as e:
-            # If we can't parse the response, log it and assume it didn't fill
-            logging.warning(f"Failed to parse order response for fill check: {e}")
+            # If we can't parse the response, log the full response for debugging
+            logging.error(f"Failed to parse order response: {e}, response: {order_result}")
             return False
 
     async def get_user_state(self):
